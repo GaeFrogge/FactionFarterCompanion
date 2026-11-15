@@ -5,7 +5,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using Microsoft.Win32;
 [assembly:System.Reflection.AssemblyTitle("Faction Farter Companion Setup")]
-[assembly:System.Reflection.AssemblyVersion("0.3.0.0")]
+[assembly:System.Reflection.AssemblyVersion("0.4.0.0")]
 
 class Setup {
     const string Name = "Faction Farter Companion";
@@ -73,7 +73,7 @@ class Setup {
                         else File.Delete(Shortcut(Environment.SpecialFolder.DesktopDirectory));
                         using (var entry = Registry.CurrentUser.CreateSubKey(Key)) {
                             entry.SetValue("DisplayName", Name);
-                            entry.SetValue("DisplayVersion", "0.3");
+                            entry.SetValue("DisplayVersion", "0.4");
                             entry.SetValue("InstallLocation", location);
                             entry.SetValue("DisplayIcon", app);
                             entry.SetValue("UninstallString", "\"" + maintenance + "\" /uninstall");

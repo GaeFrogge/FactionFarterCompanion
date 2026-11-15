@@ -10,6 +10,8 @@ using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+[assembly:System.Reflection.AssemblyVersion("0.4.0.0")]
+
 class Score {
     public string Path, Name, Faction;
     public List<Record> Records = new List<Record>();
@@ -86,6 +88,8 @@ class Window : Form {
             using (request.GetResponse()) leaderboard.Text = "Leaderboard: Connected";
         } catch (WebException) { leaderboard.Text = "Leaderboard: Not connected"; }
     }
+    Button syncAll;
+    DateTime retryAfter, nextServerCheck;
     readonly Timer timer = new Timer();
     bool rendering;
     string folder;
@@ -125,6 +129,7 @@ class Window : Form {
         BuildCharacters(); BuildStats(); BuildSettings(); ShowPage(characters);
         ReadAll();
         timer.Interval = 2500; timer.Tick += delegate { Watch(); }; timer.Start();
+        Shown += delegate { CheckUpdate(); };
         FormClosed += delegate { timer.Dispose(); };
     }
     static Label LabelOf(string value, Color color, int size) {
@@ -141,8 +146,8 @@ class Window : Form {
         return button;
     }
     void BuildCharacters() {
-        var bar = Bar(); var sync = ButtonOf("Sync all", SyncSelected); sync.ForeColor = Gold;
-        bar.Controls.Add(sync); bar.Controls.Add(ButtonOf("Refresh characters", delegate { ReadAll(); }));
+        var bar = Bar(); syncAll = ButtonOf("Sync all", SyncSelected); syncAll.ForeColor = Gold;
+        bar.Controls.Add(syncAll); bar.Controls.Add(ButtonOf("Refresh characters", delegate { ReadAll(); }));
         grid.Dock = DockStyle.Fill; grid.BackgroundColor = Base; grid.BorderStyle = BorderStyle.None;
         grid.EnableHeadersVisualStyles = false; grid.RowHeadersVisible = false; grid.AllowUserToAddRows = false;
         grid.AllowUserToDeleteRows = false; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
@@ -160,9 +165,10 @@ class Window : Form {
             var row = grid.Rows[e.RowIndex];
             if (Convert.ToBoolean(row.Cells[0].Value)) selected.Add((string)row.Tag); else selected.Remove((string)row.Tag);
             SaveSettings();
+            UpdateSyncAll();
         };
         grid.CellContentClick += delegate(object s, DataGridViewCellEventArgs e) {
-            if (e.RowIndex >= 0 && e.ColumnIndex == 5) SyncOne((string)grid.Rows[e.RowIndex].Tag);
+            if (e.RowIndex >= 0 && e.ColumnIndex == 5 && grid.Rows[e.RowIndex].Cells[5] is DataGridViewButtonCell) SyncOne((string)grid.Rows[e.RowIndex].Tag);
         };
         characters.Controls.Add(grid); characters.Controls.Add(bar);
     }
@@ -212,15 +218,15 @@ class Window : Form {
         return result;
     }
     void Watch() {
-        CheckServer();
-        if (!auto.Checked) return;
+        if (DateTime.UtcNow >= nextServerCheck) { nextServerCheck = DateTime.UtcNow.AddMinutes(5); CheckServer(); }
         try {
             var files = Discover();
             if (files.Count != observed.Count || files.Any(f => !observed.ContainsKey(f.Key) || observed[f.Key] != f.Value))
             {
                 ReadAll();
-                if (scores.Keys.Any(selected.Contains)) SyncSelected();
+
             }
+            if (auto.Checked && DateTime.UtcNow >= retryAfter && scores.Values.Any(x => selected.Contains(x.Path) && Pending(x) > 0)) SyncSelected();
         } catch (Exception e) { source.Text = "WoW save  \u00b7  " + e.Message; }
     }
     void ReadAll() {
@@ -241,38 +247,84 @@ class Window : Form {
             RenderCharacters();
         } catch (Exception e) { source.Text = "WoW save  \u00b7  Unavailable"; activity.Text = e.Message; }
     }
+    static string Digest(string text) {
+        using(var sha=System.Security.Cryptography.SHA256.Create())
+            return Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(text)));
+    }
+    static string AckName(Score score) { return Digest(score.Path.ToUpperInvariant()+"\n"+score.Name+"\n"+score.Faction); }
+    static string Prefix(Score score,int count) {
+        return Digest(new JavaScriptSerializer().Serialize(score.Records.Take(count).Select(r=>new {r.Id,r.Zone,r.Time}).ToArray()));
+    }
+    int Acknowledged(Score score) {
+        using (var key=Registry.CurrentUser.OpenSubKey(RegistryPath+"\\Acknowledged")) {
+            var saved=key==null?null:key.GetValue(AckName(score)) as string;
+            if(saved==null)return 0;
+            var parts=saved.Split('|');
+            int count;
+            if(parts.Length!=2||!int.TryParse(parts[0],out count)||count<0||count>score.Records.Count||parts[1]!=Prefix(score,count))return -1;
+            return count;
+        }
+    }
+    int Pending(Score score) {
+        int count=Acknowledged(score);
+        return count<0?-1:score.Records.Count-count;
+    }
+    void UpdateSyncAll() {
+        if(syncAll!=null)syncAll.Enabled=scores.Values.Any(x=>selected.Contains(x.Path)&&Pending(x)>0);
+    }
+    async void CheckUpdate() {
+        try {
+            using(var client=new WebClient()) {
+                var raw=await client.DownloadStringTaskAsync(Endpoint+"companion-version.json");
+                var manifest=new JavaScriptSerializer().Deserialize<Dictionary<string,string>>(raw);
+                Version latest;
+                if(!Version.TryParse(manifest["version"],out latest)||latest<=typeof(Window).Assembly.GetName().Version)return;
+                var answer=MessageBox.Show(this,"Companion "+latest+" is available. Open the download page?","Faction Farter update",MessageBoxButtons.YesNo);
+                if(answer==DialogResult.Yes)System.Diagnostics.Process.Start(Endpoint+"#companion");
+            }
+        } catch(Exception) { /* The update check is optional. */ }
+    }
     bool SyncOne(string path) {
         try {
-            var score = SaveReader.Read(path);
-            if (score == null) throw new FormatException("No supported ledger in the save.");
-            scores[path] = score;
-            source.Text = "WoW save  \u00b7  Readable";
-            var payload = new { name = score.Name, faction = score.Faction,
-                records = score.Records.Select(r => new { id = r.Id, zone = r.Zone, hour = r.Time / 3600 }).ToArray() };
-            byte[] data = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(payload));
-            var request = (HttpWebRequest)WebRequest.Create(Endpoint + "sync");
-
-            request.Timeout = 1500;
-            request.Method = "POST";
-            request.ContentType = "application/json";
-            request.Headers[HttpRequestHeader.Authorization] = "Bearer " + DeviceKey();
-            request.ContentLength = data.Length;
-            using (var stream = request.GetRequestStream()) stream.Write(data, 0, data.Length);
-            using (var response = (HttpWebResponse)request.GetResponse()) {
-                if (response.StatusCode != HttpStatusCode.OK) throw new IOException("Upload not accepted.");
+            if(DateTime.UtcNow<retryAfter){activity.Text="Sync paused. Try again in a minute.";return false;}
+            var score=SaveReader.Read(path);
+            if(score==null)throw new FormatException("No supported ledger in the save.");
+            scores[path]=score;
+            int count=Acknowledged(score);
+            if(count<0){activity.Text="This save changed or was replaced. Upload paused for this character.";RenderCharacters();return false;}
+            if(count==score.Records.Count){activity.Text="Up to date.";RenderCharacters();return true;}
+            var batch=score.Records.Skip(count).Take(250).ToArray();
+            var payload=new {name=score.Name,faction=score.Faction,records=batch.Select(r=>new {id=r.Id,zone=r.Zone,hour=r.Time/3600}).ToArray()};
+            byte[] data=Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(payload));
+            var request=(HttpWebRequest)WebRequest.Create(Endpoint+"sync");
+            request.AllowAutoRedirect=false;
+            request.Timeout=5000;
+            request.Method="POST";
+            request.ContentType="application/json";
+            request.Headers[HttpRequestHeader.Authorization]="Bearer "+DeviceKey();
+            request.ContentLength=data.Length;
+            using(var stream=request.GetRequestStream())stream.Write(data,0,data.Length);
+            using(var response=(HttpWebResponse)request.GetResponse()){
+                if(response.StatusCode!=HttpStatusCode.OK)throw new IOException("Upload not accepted.");
             }
-            uploads[path] = DateTime.Now;
-            leaderboard.Text = "Leaderboard: Connected";
-            activity.Text = "Uploaded " + score.Name + " to the hosted leaderboard.";
-            RenderCharacters(); return true;
-        } catch (WebException e) { CheckServer(); activity.Text = "Upload failed: " + e.Message; RenderCharacters(); return false; } catch (Exception e) { source.Text = "WoW save  \u00b7  Read failed"; activity.Text = e.Message; return false; }
+            count+=batch.Length;
+            using(var key=Registry.CurrentUser.CreateSubKey(RegistryPath+"\\Acknowledged"))
+                key.SetValue(AckName(score),count+"|"+Prefix(score,count));
+            uploads[path]=DateTime.Now;
+            leaderboard.Text="Leaderboard: Connected";
+            activity.Text=count==score.Records.Count?"Up to date.":(score.Records.Count-count)+" records ready. Sync again to continue.";
+            RenderCharacters();
+            return true;
+        } catch(WebException e){
+            retryAfter=DateTime.UtcNow.AddMinutes(1);
+            using(var response=e.Response as HttpWebResponse)
+                activity.Text=response!=null && ((int)response.StatusCode==429||(int)response.StatusCode==503)?"Sync paused by server.":"Upload failed. Try again in a minute.";
+            return false;
+        } catch(Exception e){activity.Text=e.Message;return false;}
     }
     void SyncSelected() {
-        var paths = scores.Keys.Where(selected.Contains).ToArray();
-        if (paths.Length == 0) { activity.Text = "Select at least one character to sync."; return; }
-        int count = paths.Count(SyncOne);
-        activity.Text = string.Format("Uploaded {0} of {1} selected characters.", count, paths.Length);
-        
+        foreach(var path in scores.Values.Where(x=>selected.Contains(x.Path)&&Pending(x)>0).Select(x=>x.Path).ToArray())
+            if(!SyncOne(path))break;
     }
     void RenderCharacters() {
         string previous = toon.SelectedItem as string;
@@ -282,11 +334,14 @@ class Window : Form {
             foreach (var score in scores.Values.OrderBy(s => s.Name)) {
                 var row = grid.Rows[grid.Rows.Add(selected.Contains(score.Path), score.Name, score.Faction, score.Records.Count, uploads.ContainsKey(score.Path) ? uploads[score.Path].ToString("g") : "Never")];
                 row.Tag = score.Path;
+                int pending=Pending(score);
+                if(pending<=0)row.Cells[5]=new DataGridViewTextBoxCell {Value=pending==0?"Up to date":"Save changed",ReadOnly=true};
                 row.Cells[2].Style.ForeColor = score.Faction == "Alliance" ? Color.LightSkyBlue : Color.LightSalmon;
                 toon.Items.Add(score.Name + " (" + score.Faction + ")  #" + (toon.Items.Count + 1));
             }
             if (toon.Items.Count > 0) toon.SelectedIndex = Math.Max(0, toon.Items.IndexOf(previous ?? ""));
         } finally { rendering = false; }
+        UpdateSyncAll();
         RenderStats();
     }
     void RenderStats() {

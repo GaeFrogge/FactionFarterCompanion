@@ -13,3 +13,9 @@ Run `build.cmd`. It uses the Windows .NET Framework C# compiler and builds both 
 - `App.manifest` declares standard-user execution and Windows compatibility.
 
 The companion stores its preferences and automatically generated device key under the current Windows user's registry. Keep that key private.
+
+## Sync and updates
+
+Sync sends up to 250 pending records per character at a time. The companion saves a local acknowledgement after the server accepts the batch. Previously acknowledged records are skipped, and a changed or shortened save is flagged for review. Auto-sync is optional and off by default. The first sync after upgrading may resend existing records; the server deduplicates them.
+
+On startup the app checks the public version manifest at https://ff.gaefrogge.com/companion-version.json. Updates are installed manually from the Companion page.
