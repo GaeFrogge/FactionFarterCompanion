@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly:System.Reflection.AssemblyVersion("0.4.0.0")]
+[assembly:System.Reflection.AssemblyVersion("0.4.1.0")]
 
 class Score {
     public string Path, Name, Faction;
@@ -335,7 +335,10 @@ class Window : Form {
                 var row = grid.Rows[grid.Rows.Add(selected.Contains(score.Path), score.Name, score.Faction, score.Records.Count, uploads.ContainsKey(score.Path) ? uploads[score.Path].ToString("g") : "Never")];
                 row.Tag = score.Path;
                 int pending=Pending(score);
-                if(pending<=0)row.Cells[5]=new DataGridViewTextBoxCell {Value=pending==0?"Up to date":"Save changed",ReadOnly=true};
+                if(pending<=0){
+                    row.Cells[5]=new DataGridViewTextBoxCell {Value=pending==0?"Up to date":"Save changed"};
+                    row.Cells[5].ReadOnly=true;
+                }
                 row.Cells[2].Style.ForeColor = score.Faction == "Alliance" ? Color.LightSkyBlue : Color.LightSalmon;
                 toon.Items.Add(score.Name + " (" + score.Faction + ")  #" + (toon.Items.Count + 1));
             }
